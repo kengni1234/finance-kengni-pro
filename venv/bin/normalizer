@@ -1,0 +1,8 @@
+#!/bin/sh
+'''exec' "/home/keni/Documents/Afin/webb/kengni_finance_v2.1_FINAL_FIXED (2)/kengni_finance_v2_complete/venv/bin/python3" "$0" "$@"
+' '''
+import sys
+from charset_normalizer.cli import cli_detect
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(cli_detect())
