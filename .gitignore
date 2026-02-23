@@ -1,7 +1,10 @@
 __pycache__/
 *.pyc
 *.db
+*.db-backup
+*.backup.db
 .env
-static/uploads/
 venv/
-.venv/
+static/uploads/
+pdf/
+Backup-codes-*.txt

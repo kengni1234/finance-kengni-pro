@@ -1074,8 +1074,18 @@ def login():
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM users WHERE email = ?", (email,))
+            PG = DATABASE_URL is not None
+            PH = '%s' if PG else '?'
+            cursor.execute(f"SELECT * FROM users WHERE email = {PH}", (email,))
             user = cursor.fetchone()
+
+            # Normalise row → dict
+            if user:
+                if PG:
+                    cols = [desc[0] for desc in cursor.description]
+                    user = dict(zip(cols, user))
+                else:
+                    user = dict(user)
             
             if user and check_password_hash(user['password'], password):
                 # Générer le token 2FA
@@ -1091,7 +1101,7 @@ def login():
                 session['pending_2fa_expires']  = (datetime.now() + timedelta(minutes=5)).isoformat()
                 
                 # Update last login
-                cursor.execute("UPDATE users SET last_login = ? WHERE id = ?", 
+                cursor.execute(f"UPDATE users SET last_login = {PH} WHERE id = {PH}",
                              (datetime.now().isoformat(), user['id']))
                 conn.commit()
                 conn.close()
