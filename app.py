@@ -9,8 +9,9 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from functools import wraps
-import sqlite3
 import os
+import psycopg2
+import psycopg2.extras
 from datetime import datetime, timedelta
 import secrets
 import random
@@ -31,7 +32,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.secret_key = secrets.token_hex(32)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
@@ -43,7 +44,7 @@ GMAIL_CONFIG = {
     'receiver_email':  'fabrice.kengni@icloud.com',
     'smtp_host':       'smtp.gmail.com',
     'smtp_port':       587,
-    'smtp_password':   os.environ.get('GMAIL_PASSWORD', 'hmoz eelj nckb npqi'),
+    'smtp_password':   'hmoz eelj nckb npqi',
 }
 
 # ── Types et couleurs des événements d'agenda ─────────────────────────────────
@@ -86,38 +87,8 @@ app.jinja_env.globals.update({
 # Ensure upload folder exists
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Database Configuration — PostgreSQL sur Railway, SQLite en local
-DATABASE_URL = os.environ.get('DATABASE_URL')
-
-if DATABASE_URL:
-    # ── Mode PostgreSQL (Railway) ──────────────────────────────────────────────
-    import psycopg2
-    import psycopg2.extras
-
-    DB_FILE = None  # Non utilisé en mode PostgreSQL
-
-    def get_db_connection():
-        """Create and return PostgreSQL database connection"""
-        try:
-            conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-            conn.autocommit = False
-            return conn
-        except Exception as e:
-            print(f"PostgreSQL connection error: {e}")
-            return None
-else:
-    # ── Mode SQLite (local) ────────────────────────────────────────────────────
-    DB_FILE = 'kengni_finance.db'
-
-    def get_db_connection():
-        """Create and return SQLite database connection"""
-        try:
-            connection = sqlite3.connect(DB_FILE)
-            connection.row_factory = sqlite3.Row
-            return connection
-        except Exception as e:
-            print(f"Database connection error: {e}")
-            return None
+# Database Configuration - PostgreSQL
+DATABASE_URL = os.environ.get('DATABASE_URL', '')
 
 # Allowed extensions for image uploads
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
@@ -125,22 +96,28 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+# Database Connection Helper
+def get_db_connection():
+    """Create and return PostgreSQL database connection"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+        conn.autocommit = False
+        return conn
+    except Exception as e:
+        print(f"PostgreSQL connection error: {e}")
+        return None
+
 # Initialize database with enhanced tables
 def init_db():
     """Initialize database with all tables"""
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-
-        # Détecter le mode : PostgreSQL ou SQLite
-        PG = DATABASE_URL is not None
-        PH = '%s' if PG else '?'  # placeholder
-        AI = 'SERIAL' if PG else 'INTEGER'  # auto-increment
         
         # Users table with preferences
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             username TEXT NOT NULL,
             email TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
@@ -158,11 +135,11 @@ def init_db():
         ''')
         
         # Financial transactions with enhanced categories
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS financial_transactions (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
-            type TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('revenue', 'expense', 'receivable', 'credit', 'debt', 'investment', 'epargne')),
             category TEXT NOT NULL,
             subcategory TEXT,
             reason TEXT NOT NULL,
@@ -173,7 +150,7 @@ def init_db():
             time TEXT NOT NULL,
             payment_method TEXT,
             reference TEXT,
-            status TEXT DEFAULT 'completed',
+            status TEXT DEFAULT 'completed' CHECK(status IN ('completed', 'pending', 'cancelled')),
             notes TEXT,
             tags TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -183,9 +160,9 @@ def init_db():
         ''')
         
         # Trading positions
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS positions (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             quantity REAL NOT NULL,
@@ -202,9 +179,9 @@ def init_db():
         ''')
         
         # Trading transactions
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             symbol TEXT NOT NULL,
             type TEXT NOT NULL,
@@ -220,15 +197,15 @@ def init_db():
         ''')
         
         # Trading journal with images
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS trading_journal (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             transaction_id INTEGER,
             symbol TEXT NOT NULL,
             date TEXT NOT NULL,
             time TEXT NOT NULL,
-            type TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('buy', 'sell')),
             quantity REAL NOT NULL,
             entry_price REAL NOT NULL,
             exit_price REAL,
@@ -251,11 +228,11 @@ def init_db():
         ''')
         
         # AI Analysis results
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS ai_analysis (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
-            analysis_type TEXT NOT NULL,
+            analysis_type TEXT NOT NULL CHECK(analysis_type IN ('financial', 'trading', 'psychological', 'strategy')),
             subject TEXT,
             insights TEXT NOT NULL,
             recommendations TEXT,
@@ -267,9 +244,9 @@ def init_db():
         ''')
         
         # Trader performance scores
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS trader_scores (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             date TEXT NOT NULL,
             overall_score REAL NOT NULL,
@@ -288,26 +265,26 @@ def init_db():
         ''')
         
         # Psychological patterns detection
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS psychological_patterns (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
-            pattern_type TEXT NOT NULL,
-            severity TEXT,
+            pattern_type TEXT NOT NULL CHECK(pattern_type IN ('FOMO', 'revenge_trading', 'overtrading', 'overconfidence', 'fear', 'greed')),
+            severity TEXT CHECK(severity IN ('low', 'medium', 'high', 'critical')),
             detected_date TEXT NOT NULL,
             description TEXT,
             evidence TEXT,
             recommendations TEXT,
-            status TEXT DEFAULT 'active',
+            status TEXT DEFAULT 'active' CHECK(status IN ('active', 'resolved', 'monitoring')),
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
         ''')
         
         # Reports table
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS reports (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             title TEXT NOT NULL,
             report_type TEXT NOT NULL,
@@ -325,11 +302,11 @@ def init_db():
         ''')
         
         # Notifications
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS notifications (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
-            type TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('alert', 'warning', 'info', 'success')),
             title TEXT NOT NULL,
             message TEXT NOT NULL,
             is_read INTEGER DEFAULT 0,
@@ -340,24 +317,26 @@ def init_db():
         ''')
 
         # ── TABLE : Événements d'agenda ────────────────────────────────────────
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS agenda_events (
-            id               {AI} PRIMARY KEY,
+            id               SERIAL PRIMARY KEY,
             user_id          INTEGER NOT NULL,
             title            TEXT NOT NULL,
             description      TEXT,
-            event_type       TEXT NOT NULL DEFAULT 'personnel',
+            event_type       TEXT NOT NULL DEFAULT 'personnel'
+                             CHECK(event_type IN ('trading','finance','formation','personnel','reunion','revue')),
             start_datetime   TEXT NOT NULL,
             end_datetime     TEXT NOT NULL,
             all_day          INTEGER DEFAULT 0,
-            recurrence       TEXT DEFAULT 'none',
+            recurrence       TEXT DEFAULT 'none'
+                             CHECK(recurrence IN ('none','daily','weekly','monthly')),
             reminder_minutes INTEGER DEFAULT 30,
             email_reminder   INTEGER DEFAULT 1,
             app_reminder     INTEGER DEFAULT 1,
             location         TEXT,
             notes            TEXT,
             linked_course_id INTEGER,
-            status           TEXT DEFAULT 'active',
+            status           TEXT DEFAULT 'active' CHECK(status IN ('active','cancelled','completed')),
             created_at       TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at       TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -365,20 +344,20 @@ def init_db():
         ''')
 
         # ── TABLE : Rappels envoyés (anti-doublon) ─────────────────────────────
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS agenda_reminders_sent (
-            id        {AI} PRIMARY KEY,
+            id        SERIAL PRIMARY KEY,
             event_id  INTEGER NOT NULL,
             sent_at   TEXT NOT NULL,
-            method    TEXT NOT NULL,
+            method    TEXT NOT NULL CHECK(method IN ('email','app')),
             FOREIGN KEY (event_id) REFERENCES agenda_events(id)
         )
         ''')
         
         # Training courses
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS training_courses (
-            id {AI} PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             user_id INTEGER NOT NULL,
             title TEXT NOT NULL DEFAULT 'Sans titre',
             description TEXT,
@@ -404,31 +383,30 @@ def init_db():
         )
         ''')
         # Migration: add columns if not exist
-        if not PG:
-            for col, defn in [
-                ('participant_names', 'TEXT DEFAULT ""'),
-                ('analyses', 'TEXT DEFAULT ""'),
-                ('strategies', 'TEXT DEFAULT ""'),
-                ('position_images', 'TEXT DEFAULT "[]"'),
-                ('time_start', 'TEXT DEFAULT ""'),
-                ('time_end', 'TEXT DEFAULT ""'),
-            ]:
-                try:
-                    cursor.execute(f'ALTER TABLE training_courses ADD COLUMN {col} {defn}')
-                except Exception:
-                    pass
+        for col, defn in [
+            ('participant_names', 'TEXT DEFAULT ""'),
+            ('analyses', 'TEXT DEFAULT ""'),
+            ('strategies', 'TEXT DEFAULT ""'),
+            ('position_images', 'TEXT DEFAULT "[]"'),
+            ('time_start', 'TEXT DEFAULT ""'),
+            ('time_end', 'TEXT DEFAULT ""'),
+        ]:
+            try:
+                cursor.execute(f'ALTER TABLE training_courses ADD COLUMN IF NOT EXISTS {col} {defn}')
+            except Exception:
+                pass
 
         # ── TABLE : Inscriptions Kengni Trading Academy ──
-        cursor.execute(f'''
+        cursor.execute('''
         CREATE TABLE IF NOT EXISTS training_leads (
-            id              {AI} PRIMARY KEY,
+            id              SERIAL PRIMARY KEY,
             full_name       TEXT NOT NULL,
             email           TEXT NOT NULL,
             whatsapp        TEXT NOT NULL,
             level_selected  TEXT NOT NULL,
             capital         TEXT,
             objective       TEXT,
-            source          TEXT DEFAULT 'Non renseigné',
+            source          TEXT DEFAULT "Non renseigné",
             status          TEXT NOT NULL DEFAULT 'Nouveau',
             notes           TEXT,
             user_id         INTEGER,
@@ -436,30 +414,27 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users(id)
         )
         ''')
-        if not PG:
-            for col, defn in [('notes', 'TEXT'), ('user_id', 'INTEGER'), ('capital', 'TEXT'), ('objective', 'TEXT'),
-                              ('payment_method', 'TEXT'), ('payment_ref', 'TEXT'), ('payment_status', "TEXT DEFAULT 'En attente'"),
-                              ('amount_paid', 'REAL DEFAULT 0'), ('sincire_sent_at', 'TEXT')]:
-                try:
-                    cursor.execute(f'ALTER TABLE training_leads ADD COLUMN {col} {defn}')
-                except Exception:
-                    pass
+        for col, defn in [('notes', 'TEXT'), ('user_id', 'INTEGER'), ('capital', 'TEXT'), ('objective', 'TEXT'),
+                          ('payment_method', 'TEXT'), ('payment_ref', 'TEXT'), ('payment_status', "TEXT DEFAULT 'En attente'"),
+                          ('amount_paid', 'REAL DEFAULT 0'), ('sincire_sent_at', 'TEXT')]:
+            try:
+                cursor.execute(f'ALTER TABLE training_leads ADD COLUMN IF NOT EXISTS {col} {defn}')
+            except Exception:
+                pass
 
         # Check if default user exists
-        cursor.execute(f"SELECT COUNT(*) as count FROM users WHERE email = {PH}", ('fabrice.kengni@icloud.com',))
-        result = cursor.fetchone()
-        count = result[0] if PG else result['count']
-        if count == 0:
+        cursor.execute("SELECT COUNT(*) as count FROM users WHERE email = %s", ('fabrice.kengni@icloud.com',))
+        if cursor.fetchone()[0] == 0:
             hashed_password = generate_password_hash('Kengni@fablo12')
-            cursor.execute(f'''
+            cursor.execute('''
                 INSERT INTO users (username, email, password, role, created_at)
-                VALUES ({PH}, {PH}, {PH}, {PH}, {PH})
+                VALUES (%s, %s, %s, %s, %s)
             ''', ('kengni', 'fabrice.kengni@icloud.com', hashed_password, 'admin', datetime.now().isoformat()))
         else:
             # Ensure admin always has the correct password (double sécurité)
             hashed_password = generate_password_hash('Kengni@fablo12')
             cursor.execute(
-                f"UPDATE users SET password={PH} WHERE email={PH} AND role='admin'",
+                "UPDATE users SET password=%s WHERE email=%s AND role='admin'",
                 (hashed_password, 'fabrice.kengni@icloud.com')
             )
         
@@ -470,15 +445,6 @@ def init_db():
 # ── URL secrète admin ──
 ADMIN_SECRET_TOKEN = 'kengni-control-7749'
 ADMIN_SECONDARY_PASSWORD = 'Kengni@fablo12'
-
-# ── Initialisation automatique (gunicorn / Railway ne passe pas par __main__) ──
-with app.app_context():
-    try:
-        init_db()
-        start_agenda_scheduler()
-        start_report_scheduler()
-    except Exception as _e:
-        print(f"[Init] Erreur au démarrage : {_e}")
 
 
 @app.context_processor
@@ -491,7 +457,7 @@ def inject_global_context():
             try:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT COUNT(*) as cnt FROM training_courses WHERE user_id = ?",
+                    "SELECT COUNT(*) as cnt FROM training_courses WHERE user_id = %s",
                     (session['user_id'],)
                 )
                 ctx['training_total_nav'] = cursor.fetchone()['cnt']
@@ -532,7 +498,7 @@ def analyze_trading_psychology(user_id):
         # Get recent transactions
         cursor.execute("""
             SELECT * FROM transactions
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 50
         """, (user_id,))
@@ -541,7 +507,7 @@ def analyze_trading_psychology(user_id):
         # Get journal entries
         cursor.execute("""
             SELECT * FROM trading_journal
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 20
         """, (user_id,))
@@ -617,7 +583,7 @@ def analyze_trading_psychology(user_id):
             cursor.execute("""
                 INSERT INTO psychological_patterns 
                 (user_id, pattern_type, severity, detected_date, description, recommendations)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 user_id,
                 pattern['type'],
@@ -651,7 +617,7 @@ def calculate_trader_score(user_id):
         # Get transactions
         cursor.execute("""
             SELECT * FROM transactions
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 100
         """, (user_id,))
@@ -680,13 +646,13 @@ def calculate_trader_score(user_id):
         # Check for stop losses
         cursor.execute("""
             SELECT COUNT(*) as with_sl FROM positions
-            WHERE user_id = ? AND stop_loss IS NOT NULL
+            WHERE user_id = %s AND stop_loss IS NOT NULL
         """, (user_id,))
         positions_with_sl = cursor.fetchone()[0]
         
         cursor.execute("""
             SELECT COUNT(*) as total FROM positions
-            WHERE user_id = ?
+            WHERE user_id = %s
         """, (user_id,))
         total_positions = cursor.fetchone()[0]
         
@@ -720,7 +686,7 @@ def calculate_trader_score(user_id):
         # Check for revenge trading patterns
         cursor.execute("""
             SELECT COUNT(*) FROM psychological_patterns
-            WHERE user_id = ? AND pattern_type = 'revenge_trading' AND status = 'active'
+            WHERE user_id = %s AND pattern_type = 'revenge_trading' AND status = 'active'
         """, (user_id,))
         revenge_patterns = cursor.fetchone()[0]
         if revenge_patterns > 0:
@@ -732,7 +698,7 @@ def calculate_trader_score(user_id):
         cursor.execute("""
             SELECT strategy, COUNT(*) as count
             FROM transactions
-            WHERE user_id = ? AND strategy IS NOT NULL
+            WHERE user_id = %s AND strategy IS NOT NULL
             GROUP BY strategy
         """, (user_id,))
         strategies = cursor.fetchall()
@@ -750,7 +716,7 @@ def calculate_trader_score(user_id):
         # 5. Emotional Control (10% weight)
         cursor.execute("""
             SELECT COUNT(*) FROM psychological_patterns
-            WHERE user_id = ? AND status = 'active'
+            WHERE user_id = %s AND status = 'active'
         """, (user_id,))
         active_patterns = cursor.fetchone()[0]
         
@@ -773,7 +739,7 @@ def calculate_trader_score(user_id):
             (user_id, date, overall_score, discipline_score, risk_management_score, 
              strategy_consistency_score, emotional_control_score, profitability_score,
              monthly_trades, win_rate)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             user_id,
             datetime.now().isoformat(),
@@ -1047,7 +1013,7 @@ def create_notification(user_id, notif_type, title, message):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO notifications (user_id, type, title, message)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             """, (user_id, notif_type, title, message))
             conn.commit()
             conn.close()
@@ -1067,25 +1033,15 @@ def index():
 def login():
     """User login"""
     if request.method == 'POST':
-        data = request.get_json(silent=True) or request.form if request.is_json else request.form
+        data = request.get_json() if request.is_json else request.form
         email = data.get('email')
         password = data.get('password')
         
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            PG = DATABASE_URL is not None
-            PH = '%s' if PG else '?'
-            cursor.execute(f"SELECT * FROM users WHERE email = {PH}", (email,))
+            cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
             user = cursor.fetchone()
-
-            # Normalise row → dict
-            if user:
-                if PG:
-                    cols = [desc[0] for desc in cursor.description]
-                    user = dict(zip(cols, user))
-                else:
-                    user = dict(user)
             
             if user and check_password_hash(user['password'], password):
                 # Générer le token 2FA
@@ -1101,7 +1057,7 @@ def login():
                 session['pending_2fa_expires']  = (datetime.now() + timedelta(minutes=5)).isoformat()
                 
                 # Update last login
-                cursor.execute(f"UPDATE users SET last_login = {PH} WHERE id = {PH}",
+                cursor.execute("UPDATE users SET last_login = %s WHERE id = %s", 
                              (datetime.now().isoformat(), user['id']))
                 conn.commit()
                 conn.close()
@@ -1268,7 +1224,7 @@ def login_flyers():
 def register():
     """User registration"""
     if request.method == 'POST':
-        data = request.get_json(silent=True) or request.form if request.is_json else request.form
+        data = request.get_json() if request.is_json else request.form
         username = data.get('username')
         email = data.get('email')
         password = data.get('password')
@@ -1299,7 +1255,7 @@ def register():
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT id FROM users WHERE email = ?", (email,))
+            cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
             existing_user = cursor.fetchone()
             
             if existing_user:
@@ -1314,11 +1270,12 @@ def register():
                 cursor.execute("""
                     INSERT INTO users 
                     (username, email, password, preferred_currency, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s) RETURNING id
                 """, (username, email, hashed_password, preferred_currency, datetime.now().isoformat()))
                 
+                row = cursor.fetchone()
+                user_id = row[0] if row else None
                 conn.commit()
-                user_id = cursor.lastrowid
                 conn.close()
                 
                 # Auto-login after registration
@@ -1371,7 +1328,7 @@ def dashboard():
                 SUM(CASE WHEN type = 'revenue' THEN amount ELSE 0 END) as total_revenue,
                 SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expenses
             FROM financial_transactions
-            WHERE user_id = ? AND date >= date('now', '-30 days')
+            WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
         """, (user_id,))
         
         result = cursor.fetchone()
@@ -1388,7 +1345,7 @@ def dashboard():
         cursor.execute("""
             SELECT SUM(quantity * current_price) as portfolio_value
             FROM positions
-            WHERE user_id = ? AND status = 'open'
+            WHERE user_id = %s AND status = 'open'
         """, (user_id,))
         
         result = cursor.fetchone()
@@ -1399,7 +1356,7 @@ def dashboard():
         # Get latest trader score
         cursor.execute("""
             SELECT overall_score FROM trader_scores
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 1
         """, (user_id,))
@@ -1411,7 +1368,7 @@ def dashboard():
         # Get recent transactions
         cursor.execute("""
             SELECT * FROM transactions
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 10
         """, (user_id,))
@@ -1420,18 +1377,18 @@ def dashboard():
         # Get unread notifications
         cursor.execute("""
             SELECT COUNT(*) as unread FROM notifications
-            WHERE user_id = ? AND is_read = 0
+            WHERE user_id = %s AND is_read = 0
         """, (user_id,))
         unread_notifications = cursor.fetchone()['unread']
         
         # === Données pour graphique Performance (6 derniers mois) ===
         cursor.execute("""
             SELECT 
-                strftime('%Y-%m', date) as month,
+                TO_CHAR(date::date, 'YYYY-MM') as month,
                 SUM(CASE WHEN type='revenue' THEN amount ELSE 0 END) as revenus,
                 SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) as depenses
             FROM financial_transactions
-            WHERE user_id = ? AND date >= date('now', '-6 months')
+            WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '6 months')
             GROUP BY month
             ORDER BY month
         """, (user_id,))
@@ -1447,7 +1404,7 @@ def dashboard():
         cursor.execute("""
             SELECT category, SUM(amount) as total
             FROM financial_transactions
-            WHERE user_id = ? AND type='expense'
+            WHERE user_id = %s AND type='expense'
             GROUP BY category
             ORDER BY total DESC
             LIMIT 6
@@ -1461,22 +1418,22 @@ def dashboard():
             SELECT id, title, category, level, scheduled_date, duration_minutes,
                    participant_names, time_start, time_end, created_at
             FROM training_courses
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY scheduled_date DESC, created_at DESC
             LIMIT 5
         """, (user_id,))
         recent_trainings = [dict(r) for r in cursor.fetchall()]
 
         # Stats formations
-        cursor.execute("SELECT COUNT(*) as total FROM training_courses WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT COUNT(*) as total FROM training_courses WHERE user_id = %s", (user_id,))
         training_total = cursor.fetchone()['total']
 
-        cursor.execute("SELECT SUM(duration_minutes) as total_min FROM training_courses WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT SUM(duration_minutes) as total_min FROM training_courses WHERE user_id = %s", (user_id,))
         training_total_min = cursor.fetchone()['total_min'] or 0
 
         cursor.execute("""
             SELECT COUNT(*) as cnt FROM training_courses
-            WHERE user_id = ? AND scheduled_date >= date('now', '-30 days')
+            WHERE user_id = %s AND scheduled_date >= (CURRENT_DATE - INTERVAL '30 days')
         """, (user_id,))
         training_this_month = cursor.fetchone()['cnt']
 
@@ -1523,7 +1480,7 @@ def finances():
         query += " AND category = ?"
         params.append(filter_cat)
     if filter_month:
-        query += " AND strftime('%Y-%m', date) = ?"
+        query += " AND TO_CHAR(date::date, 'YYYY-MM') = ?"
         params.append(filter_month)
         
     query += " ORDER BY date DESC, time DESC"
@@ -1547,17 +1504,17 @@ def finances():
     
     # Données pour Chart.js (30 derniers jours — par jour)
     cursor.execute("""
-        SELECT strftime('%Y-%m-%d', date) as day,
+        SELECT TO_CHAR(date::date, 'YYYY-MM-DD') as day,
                SUM(CASE WHEN type='revenue' THEN amount ELSE 0 END) as rev,
                SUM(CASE WHEN type='expense' THEN amount ELSE 0 END) as exp
         FROM financial_transactions
-        WHERE user_id = ? AND date >= date('now', '-30 days')
+        WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
         GROUP BY day ORDER BY day ASC
     """, (user_id,))
     chart_raw = [dict(row) for row in cursor.fetchall()]
     
     # Liste des catégories pour le menu déroulant
-    cursor.execute("SELECT DISTINCT category FROM financial_transactions WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT DISTINCT category FROM financial_transactions WHERE user_id = %s", (user_id,))
     categories = [row[0] for row in cursor.fetchall()]
     conn.close()
     
@@ -1606,7 +1563,7 @@ def add_transaction():
         cursor.execute('''
             INSERT INTO financial_transactions
             (user_id, type, amount, category, reason, date, time, status, currency, payment_method, tags, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (user_id, t_type, amount, category, f"{reason}{img_tag}",
               t_date, t_time, 'Terminé', currency, payment_method, tags, notes))
         conn.commit()
@@ -1622,7 +1579,7 @@ def delete_transaction(id):
     conn = get_db_connection()
     cursor = conn.cursor()
     # Correction: suppression dans financial_transactions et non transactions
-    cursor.execute("DELETE FROM financial_transactions WHERE id = ? AND user_id = ?", (id, session['user_id']))
+    cursor.execute("DELETE FROM financial_transactions WHERE id = %s AND user_id = %s", (id, session['user_id']))
     conn.commit()
     conn.close()
     return redirect(url_for('finances'))
@@ -1633,7 +1590,7 @@ def delete_transaction(id):
 def delete_journal(id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM trading_journal WHERE id = ? AND user_id = ?", (id, session['user_id']))
+    cursor.execute("DELETE FROM trading_journal WHERE id = %s AND user_id = %s", (id, session['user_id']))
     conn.commit()
     conn.close()
     return redirect(url_for('trading_journal'))
@@ -1642,7 +1599,7 @@ def delete_journal(id):
 @login_required
 def add_financial_transaction():
     """Add new financial transaction"""
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     user_id = session['user_id']
     
     required_fields = ['type', 'category', 'reason', 'amount', 'date', 'time']
@@ -1657,7 +1614,7 @@ def add_financial_transaction():
                 INSERT INTO financial_transactions 
                 (user_id, type, category, subcategory, reason, usage, amount, currency, 
                  date, time, payment_method, reference, status, notes, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """, (
                 user_id,
                 data['type'],
@@ -1676,14 +1633,15 @@ def add_financial_transaction():
                 data.get('tags')
             ))
             
+            row = cursor.fetchone()
             conn.commit()
-            transaction_id = cursor.lastrowid
+            transaction_id = row[0] if row else None
             
             # Create notification for large transactions
             if float(data['amount']) > 1000:
                 cursor.execute("""
                     INSERT INTO notifications (user_id, type, title, message)
-                    VALUES (?, 'info', 'Transaction importante', ?)
+                    VALUES (%s, 'info', 'Transaction importante', %s)
                 """, (user_id, f"Transaction de {data['amount']}€ enregistrée"))
                 conn.commit()
             
@@ -1709,7 +1667,7 @@ def trading_journal():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM trading_journal
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY date DESC, time DESC
         """, (user_id,))
         entries = [dict(row) for row in cursor.fetchall()]
@@ -1734,7 +1692,7 @@ def add_journal_entry():
             image_path = filepath
     
     # Get form data
-    data = request.form if not request.is_json else request.get_json(silent=True) or request.form
+    data = request.form if not request.is_json else request.get_json()
     
     conn = get_db_connection()
     if conn:
@@ -1745,7 +1703,7 @@ def add_journal_entry():
                 (user_id, symbol, date, time, type, quantity, entry_price, exit_price, 
                  profit_loss, strategy, setup_description, emotions, mistakes, 
                  lessons_learned, notes, image_path, market_conditions, risk_reward_ratio)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """, (
                 user_id,
                 data.get('symbol'),
@@ -1767,7 +1725,8 @@ def add_journal_entry():
                 float(data.get('risk_reward_ratio', 0)) if data.get('risk_reward_ratio') else None
             ))
             
-            entry_id = cursor.lastrowid
+            row = cursor.fetchone()
+            entry_id = row[0] if row else None
             
             # Analyze the trade if image provided
             if image_path:
@@ -1781,7 +1740,7 @@ def add_journal_entry():
                 # Save analysis
                 cursor.execute("""
                     INSERT INTO ai_analysis (user_id, analysis_type, subject, insights)
-                    VALUES (?, 'trading', ?, ?)
+                    VALUES (%s, 'trading', %s, %s)
                 """, (user_id, f"Journal Entry #{entry_id}", json.dumps(analysis)))
             
             conn.commit()
@@ -1811,7 +1770,7 @@ def trading():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM positions
-            WHERE user_id = ? AND status = 'open'
+            WHERE user_id = %s AND status = 'open'
             ORDER BY created_at DESC
         """, (user_id,))
         positions = [dict(row) for row in cursor.fetchall()]
@@ -1824,7 +1783,7 @@ def trading():
 def execute_trade():
     """Execute trade - accepte JSON et form-data"""
     if request.is_json:
-        data = request.get_json(silent=True) or request.form
+        data = request.get_json()
     else:
         data = request.form.to_dict()
     user_id = session['user_id']
@@ -1857,14 +1816,14 @@ def execute_trade():
             # Insert transaction
             cursor.execute("""
                 INSERT INTO transactions (user_id, symbol, type, quantity, price, amount, fees, strategy, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """, (user_id, symbol, trade_type, quantity, price, amount, fees, strategy, datetime.now().isoformat()))
             
             # Update positions
             if trade_type == 'buy':
                 cursor.execute("""
                     SELECT * FROM positions 
-                    WHERE user_id = ? AND symbol = ? AND status = 'open'
+                    WHERE user_id = %s AND symbol = %s AND status = 'open'
                 """, (user_id, symbol))
                 existing_position = cursor.fetchone()
                 
@@ -1875,19 +1834,19 @@ def execute_trade():
                     
                     cursor.execute("""
                         UPDATE positions 
-                        SET quantity = ?, avg_price = ?, updated_at = ?
-                        WHERE user_id = ? AND symbol = ? AND status = 'open'
+                        SET quantity = %s, avg_price = %s, updated_at = %s
+                        WHERE user_id = %s AND symbol = %s AND status = 'open'
                     """, (new_quantity, new_avg_price, datetime.now().isoformat(), user_id, symbol))
                 else:
                     cursor.execute("""
                         INSERT INTO positions (user_id, symbol, quantity, avg_price, current_price, status)
-                        VALUES (?, ?, ?, ?, ?, 'open')
+                        VALUES (%s, %s, %s, %s, %s, 'open')
                     """, (user_id, symbol, quantity, price, price))
             else:  # sell
                 cursor.execute("""
                     UPDATE positions 
-                    SET quantity = quantity - ?, updated_at = ?
-                    WHERE user_id = ? AND symbol = ? AND status = 'open'
+                    SET quantity = quantity - %s, updated_at = %s
+                    WHERE user_id = %s AND symbol = %s AND status = 'open'
                 """, (quantity, datetime.now().isoformat(), user_id, symbol))
             
             conn.commit()
@@ -1923,7 +1882,7 @@ def portfolio():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM positions
-            WHERE user_id = ? AND status = 'open'
+            WHERE user_id = %s AND status = 'open'
             ORDER BY (quantity * current_price) DESC
         """, (user_id,))
         positions = [dict(row) for row in cursor.fetchall()]
@@ -1959,7 +1918,7 @@ def portfolio():
 @login_required
 def add_position():
     """Add new portfolio position"""
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     user_id = session['user_id']
     
     required_fields = ['symbol', 'quantity', 'avg_price']
@@ -1992,7 +1951,7 @@ def add_position():
                     INSERT INTO positions 
                     (user_id, symbol, asset_type, quantity, avg_price, current_price, 
                      status, platform, notes)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
                 """, (
                     user_id,
                     data['symbol'].upper(),
@@ -2005,12 +1964,13 @@ def add_position():
                     data.get('notes', '')
                 ))
                 
+                row = cursor.fetchone()
                 conn.commit()
-                position_id = cursor.lastrowid
+                position_id = row[0] if row else None
                 conn.close()
                 
                 return jsonify({'success': True, 'id': position_id})
-            except sqlite3.IntegrityError as e:
+            except psycopg2.IntegrityError as e:
                 conn.close()
                 return jsonify({'success': False, 'message': 'Cette position existe déjà'}), 400
             except Exception as e:
@@ -2038,7 +1998,7 @@ def export_portfolio():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM positions
-        WHERE user_id = ? AND status = 'open'
+        WHERE user_id = %s AND status = 'open'
         ORDER BY symbol
     """, (user_id,))
     positions = [dict(row) for row in cursor.fetchall()]
@@ -2191,7 +2151,7 @@ def export_finances():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM financial_transactions
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY date DESC, time DESC
         LIMIT 1000
     """, (user_id,))
@@ -2358,7 +2318,7 @@ def analyze_portfolio():
     cursor = conn.cursor()
     cursor.execute("""
         SELECT * FROM positions
-        WHERE user_id = ? AND status = 'open'
+        WHERE user_id = %s AND status = 'open'
     """, (user_id,))
     positions = [dict(row) for row in cursor.fetchall()]
     conn.close()
@@ -2445,7 +2405,7 @@ def ai_analyze_finances():
             SUM(amount) as total,
             COUNT(*) as count
         FROM financial_transactions
-        WHERE user_id = ? AND date >= date('now', '-30 days')
+        WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
         GROUP BY type, category
         ORDER BY total DESC
     """, (user_id,))
@@ -2457,7 +2417,7 @@ def ai_analyze_finances():
             SUM(CASE WHEN type = 'revenue' THEN amount ELSE 0 END) as total_revenue,
             SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as total_expenses
         FROM financial_transactions
-        WHERE user_id = ? AND date >= date('now', '-30 days')
+        WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
     """, (user_id,))
     
     totals = cursor.fetchone()
@@ -2504,7 +2464,7 @@ def ai_assistant():
 @login_required
 def ai_chat():
     """AI conversational assistant endpoint"""
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     user_id = session['user_id']
     question = data.get('question', '').lower()
     
@@ -2528,7 +2488,7 @@ def ai_chat():
                     SUM(CASE WHEN type = 'buy' THEN amount ELSE 0 END) as total_buy,
                     COUNT(*) as trade_count
                 FROM transactions
-                WHERE user_id = ? AND created_at >= date('now', '-30 days')
+                WHERE user_id = %s AND created_at >= (CURRENT_DATE - INTERVAL '30 days')
                 GROUP BY symbol
                 HAVING (total_sell + total_buy) < 0
                 ORDER BY (total_sell + total_buy) ASC
@@ -2557,7 +2517,7 @@ def ai_chat():
                     SUM(CASE WHEN amount > 0 THEN 1 ELSE 0 END) as wins,
                     SUM(CASE WHEN amount < 0 THEN 1 ELSE 0 END) as losses
                 FROM transactions
-                WHERE user_id = ? AND strategy IS NOT NULL AND type = 'sell'
+                WHERE user_id = %s AND strategy IS NOT NULL AND type = 'sell'
                 GROUP BY strategy
                 ORDER BY total_profit DESC
             """, (user_id,))
@@ -2606,7 +2566,7 @@ def ai_chat():
                     SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) as total_losses,
                     SUM(amount) as net_profit
                 FROM transactions
-                WHERE user_id = ? AND type = 'sell'
+                WHERE user_id = %s AND type = 'sell'
             """, (user_id,))
             
             result = cursor.fetchone()
@@ -2667,7 +2627,7 @@ def ai_chat():
                     SUM(CASE WHEN type IN ('expense','debt') THEN amount ELSE 0 END) as exp,
                     COUNT(*) as cnt
                 FROM financial_transactions
-                WHERE user_id = ? AND date >= date('now', '-30 days')
+                WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
             """, (user_id,))
             row = cursor.fetchone()
             rev = row['rev'] or 0
@@ -2692,7 +2652,7 @@ def ai_chat():
             response['answer'] += "5. 📊 Win rate cible : ≥ 55% avec Risk/Reward ≥ 1:2"
 
         elif 'formation' in question or 'cours' in question or 'training' in question:
-            cursor.execute("SELECT COUNT(*) as cnt, SUM(duration_minutes) as dur FROM training_courses WHERE user_id=?", (user_id,))
+            cursor.execute("SELECT COUNT(*) as cnt, SUM(duration_minutes) as dur FROM training_courses WHERE user_id=%s", (user_id,))
             row = cursor.fetchone()
             cnt = row['cnt'] or 0
             dur = row['dur'] or 0
@@ -2742,7 +2702,7 @@ def analysis():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM ai_analysis
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 10
         """, (user_id,))
@@ -2770,7 +2730,7 @@ def analyze_finances():
                 SUM(CASE WHEN type = 'revenue' THEN amount ELSE 0 END) as revenue,
                 SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as expenses
             FROM financial_transactions
-            WHERE user_id = ? AND date >= date('now', '-30 days')
+            WHERE user_id = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
         """, (user_id,))
         
         result = cursor.fetchone()
@@ -2784,7 +2744,7 @@ def analyze_finances():
         # Save analysis
         cursor.execute("""
             INSERT INTO ai_analysis (user_id, analysis_type, subject, insights)
-            VALUES (?, 'financial', 'Monthly Report', ?)
+            VALUES (%s, 'financial', 'Monthly Report', %s)
         """, (user_id, json.dumps(insights)))
         
         conn.commit()
@@ -2812,7 +2772,7 @@ def settings():
     
     if conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
         user = cursor.fetchone()
         if user:
             user_settings = dict(user)
@@ -2824,7 +2784,7 @@ def settings():
 @login_required
 def update_settings():
     """Update user settings"""
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     user_id = session['user_id']
     
     conn = get_db_connection()
@@ -2879,7 +2839,7 @@ def notifications():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM notifications
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 50
         """, (user_id,))
@@ -2899,7 +2859,7 @@ def mark_notification_read(notification_id):
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE notifications SET is_read = 1
-            WHERE id = ? AND user_id = ?
+            WHERE id = %s AND user_id = %s
         """, (notification_id, user_id))
         conn.commit()
         conn.close()
@@ -2920,7 +2880,7 @@ def reports():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM reports
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
         """, (user_id,))
         reports_list = [dict(row) for row in cursor.fetchall()]
@@ -2932,7 +2892,7 @@ def reports():
 @login_required
 def generate_report():
     """Generate financial report"""
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     user_id = session['user_id']
     
     report_type = data.get('type', 'monthly')
@@ -2963,7 +2923,7 @@ def generate_report():
                     SUM(CASE WHEN type = 'revenue' THEN amount ELSE 0 END) as revenue,
                     SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as expenses
                 FROM financial_transactions
-                WHERE user_id = ? AND date BETWEEN ? AND ?
+                WHERE user_id = %s AND date BETWEEN %s AND %s
             """, (user_id, period_start, period_end))
             
             result = cursor.fetchone()
@@ -2976,7 +2936,7 @@ def generate_report():
             cursor.execute("""
                 INSERT INTO reports 
                 (user_id, title, report_type, period_start, period_end, revenue, expenses, profit, profit_margin)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id
             """, (
                 user_id,
                 f"Rapport {report_type} - {period_start} à {period_end}",
@@ -2989,8 +2949,9 @@ def generate_report():
                 profit_margin
             ))
             
+            row = cursor.fetchone()
             conn.commit()
-            report_id = cursor.lastrowid
+            report_id = row[0] if row else None
             conn.close()
             
             return jsonify({'success': True, 'report_id': report_id})
@@ -3010,7 +2971,7 @@ def download_report(report_id):
     if not conn:
         return jsonify({'error': 'DB error'}), 500
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM reports WHERE id = ? AND user_id = ?", (report_id, user_id))
+    cursor.execute("SELECT * FROM reports WHERE id = %s AND user_id = %s", (report_id, user_id))
     report = cursor.fetchone()
     if not report:
         conn.close()
@@ -3101,7 +3062,7 @@ def history():
         cursor = conn.cursor()
         cursor.execute("""
             SELECT * FROM transactions
-            WHERE user_id = ?
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 200
         """, (user_id,))
@@ -3120,7 +3081,7 @@ def delete_journal_entry(id):
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM trading_journal WHERE id = ? AND user_id = ?",
+            cursor.execute("DELETE FROM trading_journal WHERE id = %s AND user_id = %s",
                           (id, session['user_id']))
             conn.commit()
             conn.close()
@@ -3141,7 +3102,7 @@ def delete_financial_transaction(id):
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM financial_transactions WHERE id = ? AND user_id = ?",
+            cursor.execute("DELETE FROM financial_transactions WHERE id = %s AND user_id = %s",
                           (id, session['user_id']))
             conn.commit()
             conn.close()
@@ -3165,7 +3126,7 @@ def delete_trade(id):
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM transactions WHERE id = ? AND user_id = ?",
+            cursor.execute("DELETE FROM transactions WHERE id = %s AND user_id = %s",
                           (id, session['user_id']))
             conn.commit()
             conn.close()
@@ -3193,7 +3154,7 @@ def delete_position(id):
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM positions WHERE id = ? AND user_id = ?",
+            cursor.execute("DELETE FROM positions WHERE id = %s AND user_id = %s",
                           (id, session['user_id']))
             conn.commit()
             conn.close()
@@ -3220,13 +3181,13 @@ def admin_secret_entry():
 
 @app.route(f'/{ADMIN_SECRET_TOKEN}/auth', methods=['POST'])
 def admin_auth():
-    data = request.get_json(silent=True) or request.form if request.is_json else request.form
+    data = request.get_json() if request.is_json else request.form
     email    = data.get('email','').strip()
     password = data.get('password','').strip()
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE email=? AND role IN ('admin','superadmin')", (email,))
+        cursor.execute("SELECT * FROM users WHERE email=%s AND role IN ('admin','superadmin')", (email,))
         user = cursor.fetchone()
         if user and check_password_hash(user['password'], password):
             # 2FA for admin
@@ -3239,7 +3200,7 @@ def admin_auth():
             session['pending_2fa_role']     = user['role']
             session['pending_2fa_expires']  = (datetime.now() + timedelta(minutes=5)).isoformat()
             session['pending_2fa_is_admin_login'] = True
-            cursor.execute("UPDATE users SET last_login=? WHERE id=?", (datetime.now().isoformat(), user['id']))
+            cursor.execute("UPDATE users SET last_login=%s WHERE id=%s", (datetime.now().isoformat(), user['id']))
             conn.commit(); conn.close()
             if request.is_json: return jsonify({'success': True, 'redirect': url_for('verify_token_page', email=user['email'])})
             return redirect(url_for('verify_token_page', email=user['email']))
@@ -3273,7 +3234,7 @@ def admin_secondary_verify():
     """Double sécurité admin — mot de passe secondaire Kengni@fablo12"""
     error = None
     if request.method == 'POST':
-        pwd = (request.get_json(silent=True) or request.form or request.form).get('secondary_password', '')
+        pwd = (request.get_json() or request.form).get('secondary_password', '')
         # Compteur de tentatives
         session['admin_sec_attempts'] = session.get('admin_sec_attempts', 0) + 1
         if session['admin_sec_attempts'] > 3:
@@ -3299,7 +3260,7 @@ def admin_secondary_verify():
 @app.route('/admin/create-user', methods=['POST'])
 @admin_required
 def admin_create_user():
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     username,email,password = data.get('username','').strip(), data.get('email','').strip(), data.get('password','').strip()
     role, status = data.get('role','user'), data.get('status','active')
     allowed = ['viewer','user','editor','admin']
@@ -3309,18 +3270,19 @@ def admin_create_user():
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE email=?", (email,))
+        cursor.execute("SELECT id FROM users WHERE email=%s", (email,))
         if cursor.fetchone(): conn.close(); return jsonify({'success':False,'message':'Email déjà utilisé'}),409
-        cursor.execute("INSERT INTO users (username,email,password,role,status,created_at) VALUES (?,?,?,?,?,?)",
+        cursor.execute("INSERT INTO users (username,email,password,role,status,created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
                        (username,email,generate_password_hash(password),role,status,datetime.now().isoformat()))
-        conn.commit(); new_id=cursor.lastrowid; conn.close()
+        conn.commit(); row = cursor.fetchone()
+        new_id = row[0] if row else None; conn.close()
         return jsonify({'success':True,'message':f'Compte créé (ID {new_id})','id':new_id})
     return jsonify({'success':False,'message':'Erreur DB'}),500
 
 @app.route('/admin/update-user/<int:user_id>', methods=['POST'])
 @admin_required
 def admin_update_user(user_id):
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     role, status = data.get('role'), data.get('status')
     allowed = ['viewer','user','editor','admin']
     if session.get('role')=='superadmin': allowed.append('superadmin')
@@ -3328,8 +3290,8 @@ def admin_update_user(user_id):
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        if role:   cursor.execute("UPDATE users SET role=?,updated_at=? WHERE id=?",   (role,   datetime.now().isoformat(), user_id))
-        if status: cursor.execute("UPDATE users SET status=?,updated_at=? WHERE id=?", (status, datetime.now().isoformat(), user_id))
+        if role:   cursor.execute("UPDATE users SET role=%s,updated_at=%s WHERE id=%s",   (role,   datetime.now().isoformat(), user_id))
+        if status: cursor.execute("UPDATE users SET status=%s,updated_at=%s WHERE id=%s", (status, datetime.now().isoformat(), user_id))
         conn.commit(); conn.close()
         return jsonify({'success':True,'message':'Utilisateur mis à jour'})
     return jsonify({'success':False,'message':'Erreur DB'}),500
@@ -3337,13 +3299,13 @@ def admin_update_user(user_id):
 @app.route('/admin/reset-password/<int:user_id>', methods=['POST'])
 @admin_required
 def admin_reset_password(user_id):
-    data = request.get_json(silent=True) or request.form
+    data = request.get_json()
     password = data.get('password','').strip()
     if len(password)<6: return jsonify({'success':False,'message':'Mot de passe trop court'}),400
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE users SET password=?,updated_at=? WHERE id=?",
+        cursor.execute("UPDATE users SET password=%s,updated_at=%s WHERE id=%s",
                        (generate_password_hash(password), datetime.now().isoformat(), user_id))
         conn.commit(); conn.close()
         return jsonify({'success':True,'message':'Mot de passe réinitialisé'})
@@ -3356,7 +3318,7 @@ def admin_delete_user(user_id):
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM users WHERE id=?", (user_id,))
+        cursor.execute("DELETE FROM users WHERE id=%s", (user_id,))
         conn.commit(); conn.close()
         return jsonify({'success':True,'message':'Utilisateur supprimé'})
     return jsonify({'success':False,'message':'Erreur DB'}),500
@@ -3416,7 +3378,7 @@ def training():
     cursor = conn.cursor()
     cursor.execute('''
         SELECT * FROM training_courses
-        WHERE user_id = ?
+        WHERE user_id = %s
         ORDER BY day_of_week, created_at DESC
     ''', (session['user_id'],))
     courses = [dict(r) for r in cursor.fetchall()]
@@ -3470,7 +3432,7 @@ def training_add():
         (user_id, title, description, course_url, thumbnail_url, category, level,
          day_of_week, scheduled_date, duration_minutes, tags, is_published,
          participant_names, analyses, strategies, position_images, time_start, time_end, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     ''', (
         session['user_id'],
         request.form.get('title', 'Sans titre'),
@@ -3492,7 +3454,8 @@ def training_add():
         request.form.get('time_end', ''),
         datetime.now().isoformat()
     ))
-    new_id = cursor.lastrowid
+    row = cursor.fetchone()
+    new_id = row[0] if row else None
     conn.commit()
     conn.close()
     return jsonify({'success': True, 'id': new_id, 'thumbnail': thumbnail})
@@ -3509,7 +3472,7 @@ def training_update(cid):
     if not conn:
         return jsonify({'success': False}), 500
     cursor = conn.cursor()
-    cursor.execute('SELECT position_images FROM training_courses WHERE id=? AND user_id=?', (cid, session['user_id']))
+    cursor.execute('SELECT position_images FROM training_courses WHERE id=%s AND user_id=%s', (cid, session['user_id']))
     row = cursor.fetchone()
     try:
         existing_images = json.loads(row['position_images'] if row else '[]') or []
@@ -3532,12 +3495,12 @@ def training_update(cid):
 
     cursor.execute('''
         UPDATE training_courses SET
-            title=?, description=?, course_url=?, thumbnail_url=?,
-            category=?, level=?, day_of_week=?, scheduled_date=?,
-            duration_minutes=?, tags=?, is_published=?,
-            participant_names=?, analyses=?, strategies=?, position_images=?,
-            time_start=?, time_end=?, updated_at=?
-        WHERE id=? AND user_id=?
+            title=%s, description=%s, course_url=%s, thumbnail_url=%s,
+            category=%s, level=%s, day_of_week=%s, scheduled_date=%s,
+            duration_minutes=%s, tags=%s, is_published=%s,
+            participant_names=%s, analyses=%s, strategies=%s, position_images=%s,
+            time_start=%s, time_end=%s, updated_at=%s
+        WHERE id=%s AND user_id=%s
     ''', (
         request.form.get('title'), request.form.get('description'), url, thumbnail,
         request.form.get('category'), request.form.get('level'), request.form.get('day_of_week'),
@@ -3563,7 +3526,7 @@ def training_delete(cid):
     if not conn:
         return jsonify({'success': False}), 500
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM training_courses WHERE id=? AND user_id=?', (cid, session['user_id']))
+    cursor.execute('DELETE FROM training_courses WHERE id=%s AND user_id=%s', (cid, session['user_id']))
     conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -3572,7 +3535,7 @@ def training_delete(cid):
 @app.route('/api/training/fetch-thumb', methods=['POST'])
 @login_required
 def training_fetch_thumb():
-    data = request.get_json(silent=True) or request.form or {}
+    data = request.get_json() or {}
     url = data.get('url', '')
     thumb = detect_thumbnail(url)
     return jsonify({'thumbnail': thumb})
@@ -3629,7 +3592,7 @@ def register_trading_lead():
 
     # Vérification doublon
     cursor.execute(
-        "SELECT id FROM training_leads WHERE email=? AND level_selected=?",
+        "SELECT id FROM training_leads WHERE email=%s AND level_selected=%s",
         (email, level_selected)
     )
     if cursor.fetchone():
@@ -3643,7 +3606,7 @@ def register_trading_lead():
     cursor.execute('''
         INSERT INTO training_leads
         (full_name, email, whatsapp, level_selected, capital, objective, source, status, user_id, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, "Nouveau", ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'Nouveau', %s, %s) RETURNING id
     ''', (
         full_name, email, whatsapp, level_selected,
         capital or None, objective or None, source,
@@ -3652,22 +3615,7 @@ def register_trading_lead():
     conn.commit()
     conn.close()
 
-    # ── Envoi automatique de l'email de paiement au prospect ──
-    lead_dict = {
-        'full_name':      full_name,
-        'email':          email,
-        'whatsapp':       whatsapp,
-        'level_selected': level_selected,
-        'capital':        capital,
-        'objective':      objective,
-    }
-    threading.Thread(
-        target=_send_inscription_payment_email,
-        args=(lead_dict,),
-        daemon=True
-    ).start()
-
-    flash(f"Inscription confirmée ! Un email de paiement a été envoyé à {email}. 🎉", 'success')
+    flash(f"Inscription confirmée ! Nous vous contacterons sur WhatsApp très bientôt. 🎉", 'success')
     return redirect(url_for('training_registration', success=1, wa=whatsapp))
 
 
@@ -3703,7 +3651,8 @@ def update_lead_status(lead_id):
         return redirect(url_for('admin_leads'))
     conn = get_db_connection()
     if conn:
-        conn.execute("UPDATE training_leads SET status=? WHERE id=?", (new_status, lead_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE training_leads SET status=%s WHERE id=%s", (new_status, lead_id))
         conn.commit()
         conn.close()
         flash(f"Statut mis à jour : {new_status}", 'success')
@@ -3717,7 +3666,8 @@ def delete_lead(lead_id):
     """Supprime un lead."""
     conn = get_db_connection()
     if conn:
-        conn.execute("DELETE FROM training_leads WHERE id=?", (lead_id,))
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM training_leads WHERE id=%s", (lead_id,))
         conn.commit()
         conn.close()
         flash("Lead supprimé.", 'success')
@@ -3813,14 +3763,14 @@ def _send_sincire_email(lead: dict) -> bool:
       <p style="color:#ffd700;font-weight:700;font-size:13px;margin:0 0 8px;">📋 Après votre paiement</p>
       <ol style="color:#aaa;font-size:13px;margin:0;padding-left:18px;line-height:2;">
         <li>Envoyez la capture d'écran de votre paiement sur WhatsApp</li>
-        <li>Numéro WhatsApp : <strong style="color:#fff;">+237 695 072 659</strong></li>
+        <li>Numéro WhatsApp : <strong style="color:#fff;">+237 695 072 759</strong></li>
         <li>Votre accès à la formation sera activé sous 24h</li>
       </ol>
     </div>
 
     <!-- CTA -->
     <div style="text-align:center;margin-bottom:16px;">
-      <a href="https://wa.me/237695072659?text=Bonjour%2C%20j%27ai%20effectu%C3%A9%20mon%20paiement%20pour%20la%20formation%20{level.replace(' ','%20')}"
+      <a href="https://wa.me/237695072759?text=Bonjour%2C%20j%27ai%20effectu%C3%A9%20mon%20paiement%20pour%20la%20formation%20{level.replace(' ','%20')}"
          style="background:linear-gradient(135deg,#00d4aa,#00ff88);color:#000;font-weight:800;font-size:14px;padding:14px 32px;border-radius:10px;text-decoration:none;display:inline-block;box-shadow:0 4px 16px rgba(0,212,170,.4);">
         📲 Confirmer mon paiement sur WhatsApp
       </a>
@@ -3842,7 +3792,7 @@ def _send_sincire_email(lead: dict) -> bool:
             f"• Orange Money : {pay['orange_money']['numero']}\n"
             f"• MTN MoMo : {pay['mtn_money']['numero']}\n"
             f"• PayPal / Crypto : {pay['paypal']['adresse']}\n\n"
-            f"Après paiement, envoyez la capture sur WhatsApp : +237 695 072 659\n\n"
+            f"Après paiement, envoyez la capture sur WhatsApp : +237 695 072 759\n\n"
             f"— Kengni Trading Academy")
 
     try:
@@ -3875,7 +3825,7 @@ def sincire_lead(lead_id):
     if not conn:
         return jsonify({'success': False, 'error': 'DB error'}), 500
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM training_leads WHERE id=?", (lead_id,))
+    cursor.execute("SELECT * FROM training_leads WHERE id=%s", (lead_id,))
     lead = cursor.fetchone()
     if not lead:
         conn.close()
@@ -3886,7 +3836,7 @@ def sincire_lead(lead_id):
     if ok:
         now_iso = datetime.now().isoformat()
         cursor.execute(
-            "UPDATE training_leads SET sincire_sent_at=?, status='Contacté' WHERE id=?",
+            "UPDATE training_leads SET sincire_sent_at=%s, status='Contacté' WHERE id=%s",
             (now_iso, lead_id)
         )
         conn.commit()
@@ -3909,14 +3859,15 @@ def sincire_lead(lead_id):
 @admin_required
 def update_lead_payment(lead_id):
     """Met à jour les infos de paiement d'un lead."""
-    data = request.get_json(silent=True) or request.form or {}
+    data = request.get_json() or {}
     conn = get_db_connection()
     if not conn:
         return jsonify({'success': False}), 500
-    conn.execute('''
+    cursor = conn.cursor()
+    cursor.execute('''
         UPDATE training_leads
-        SET payment_method=?, payment_ref=?, payment_status=?, amount_paid=?
-        WHERE id=?
+        SET payment_method=%s, payment_ref=%s, payment_status=%s, amount_paid=%s
+        WHERE id=%s
     ''', (
         data.get('payment_method',''),
         data.get('payment_ref',''),
@@ -4123,19 +4074,14 @@ def _agenda_check_reminders():
     while True:
         try:
             now = datetime.now()
-            conn = get_db_connection()
-            if not conn:
-                time.sleep(60)
-                continue
+            conn = psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
             cursor = conn.cursor()
             window = (now + timedelta(hours=48)).isoformat()
-            PG = DATABASE_URL is not None
-            PH = '%s' if PG else '?'
 
-            cursor.execute(f'''
+            cursor.execute('''
                 SELECT * FROM agenda_events
                 WHERE status = 'active'
-                  AND start_datetime BETWEEN {PH} AND {PH}
+                  AND start_datetime BETWEEN %s AND %s
                   AND (email_reminder = 1 OR app_reminder = 1)
             ''', (now.isoformat(), window))
             events = [dict(r) for r in cursor.fetchall()]
@@ -4149,9 +4095,9 @@ def _agenda_check_reminders():
                         continue
 
                     # Anti-doublon
-                    cursor.execute(f'''
+                    cursor.execute('''
                         SELECT id FROM agenda_reminders_sent
-                        WHERE event_id = {PH} AND sent_at >= {PH}
+                        WHERE event_id = %s AND sent_at >= %s
                     ''', (ev['id'], (now - timedelta(minutes=3)).isoformat()))
                     if cursor.fetchone():
                         continue
@@ -4160,21 +4106,21 @@ def _agenda_check_reminders():
                     if ev['email_reminder']:
                         ok = _send_agenda_email(ev, ev['reminder_minutes'])
                         if ok:
-                            cursor.execute(f'INSERT INTO agenda_reminders_sent (event_id,sent_at,method) VALUES ({PH},{PH},{PH})',
+                            cursor.execute('INSERT INTO agenda_reminders_sent (event_id,sent_at,method) VALUES (%s,%s,%s)',
                                            (ev['id'], now.isoformat(), 'email'))
 
                     # Notification in-app
                     if ev['app_reminder']:
                         h = ev['reminder_minutes']
                         label = f"{h//60}h" if h >= 60 else f"{h}min"
-                        cursor.execute(f'''
+                        cursor.execute('''
                             INSERT INTO notifications (user_id, type, title, message, action_url, created_at)
-                            VALUES ({PH},{PH},{PH},{PH},{PH},{PH})
+                            VALUES (%s,%s,%s,%s,%s,%s)
                         ''', (ev['user_id'], 'warning' if h <= 15 else 'info',
                               f"⏰ Rappel dans {label} : {ev['title']}",
                               f"Votre événement commence à {ev['start_datetime'][11:16]}.",
                               '/agenda', now.isoformat()))
-                        cursor.execute(f'INSERT INTO agenda_reminders_sent (event_id,sent_at,method) VALUES ({PH},{PH},{PH})',
+                        cursor.execute('INSERT INTO agenda_reminders_sent (event_id,sent_at,method) VALUES (%s,%s,%s)',
                                        (ev['id'], now.isoformat(), 'app'))
 
                     conn.commit()
@@ -4212,15 +4158,15 @@ def agenda():
 
         cursor.execute('''
             SELECT * FROM agenda_events
-            WHERE user_id=? AND status!='cancelled'
-              AND DATE(start_datetime) BETWEEN ? AND ?
+            WHERE user_id=%s AND status!='cancelled'
+              AND DATE(start_datetime) BETWEEN %s AND %s
             ORDER BY start_datetime ASC
         ''', (user_id, start_w, end_w))
         events = [dict(r) for r in cursor.fetchall()]
 
         cursor.execute('''
             SELECT * FROM agenda_events
-            WHERE user_id=? AND status='active' AND start_datetime >= ?
+            WHERE user_id=%s AND status='active' AND start_datetime >= %s
             ORDER BY start_datetime ASC LIMIT 1
         ''', (user_id, now.isoformat()))
         row = cursor.fetchone()
@@ -4228,7 +4174,7 @@ def agenda():
 
         cursor.execute('''
             SELECT event_type, COUNT(*) as cnt FROM agenda_events
-            WHERE user_id=? AND status='active' AND DATE(start_datetime)>=DATE('now')
+            WHERE user_id=%s AND status='active' AND DATE(start_datetime)>=DATE('now')
             GROUP BY event_type
         ''', (user_id,))
         stats_raw = {r['event_type']: r['cnt'] for r in cursor.fetchall()}
@@ -4266,7 +4212,7 @@ def agenda():
 @login_required
 def agenda_create_event():
     user_id = session['user_id']
-    data    = request.get_json(silent=True) or request.form or {}
+    data    = request.get_json() or {}
 
     title      = (data.get('title') or '').strip()
     event_type = data.get('event_type', 'personnel')
@@ -4287,7 +4233,7 @@ def agenda_create_event():
         (user_id,title,description,event_type,start_datetime,end_datetime,
          all_day,recurrence,reminder_minutes,email_reminder,app_reminder,
          location,notes,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
     ''', (
         user_id, title,
         data.get('description',''), event_type, start_dt, end_dt,
@@ -4297,10 +4243,11 @@ def agenda_create_event():
         data.get('location',''), data.get('notes',''),
         datetime.now().isoformat(), datetime.now().isoformat()
     ))
-    event_id = cursor.lastrowid
+    row = cursor.fetchone()
+    event_id = row[0] if row else None
     cursor.execute('''
         INSERT INTO notifications (user_id,type,title,message,action_url,created_at)
-        VALUES (?,?,?,?,?,?)
+        VALUES (%s,%s,%s,%s,%s,%s)
     ''', (user_id, 'success',
           f"📅 Événement créé : {title}",
           f'Planifié le {start_dt[:16].replace("T"," à ")}. Rappel dans {data.get("reminder_minutes",30)} min.',
@@ -4321,8 +4268,8 @@ def agenda_get_events():
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM agenda_events
-            WHERE user_id=? AND status!='cancelled'
-              AND start_datetime BETWEEN ? AND ?
+            WHERE user_id=%s AND status!='cancelled'
+              AND start_datetime BETWEEN %s AND %s
             ORDER BY start_datetime ASC
         ''', (user_id, start[:10], end[:10]))
         for e in cursor.fetchall():
@@ -4346,12 +4293,12 @@ def agenda_get_events():
 @login_required
 def agenda_update_event(event_id):
     user_id = session['user_id']
-    data    = request.get_json(silent=True) or request.form or {}
+    data    = request.get_json() or {}
     conn    = get_db_connection()
     if not conn:
         return jsonify({'success': False}), 500
     cursor = conn.cursor()
-    cursor.execute('SELECT id FROM agenda_events WHERE id=? AND user_id=?', (event_id, user_id))
+    cursor.execute('SELECT id FROM agenda_events WHERE id=%s AND user_id=%s', (event_id, user_id))
     if not cursor.fetchone():
         conn.close(); return jsonify({'success': False, 'error': 'Non trouvé'}), 404
 
@@ -4364,7 +4311,7 @@ def agenda_update_event(event_id):
             sets.append(f'{f}=?'); vals.append(data[f])
     if sets:
         vals += [datetime.now().isoformat(), event_id, user_id]
-        cursor.execute(f"UPDATE agenda_events SET {', '.join(sets)}, updated_at=? WHERE id=? AND user_id=?", vals)
+        cursor.execute(f"UPDATE agenda_events SET {', '.join(sets)}, updated_at=%s WHERE id=%s AND user_id=%s", vals)
         conn.commit()
     conn.close()
     return jsonify({'success': True})
@@ -4376,7 +4323,8 @@ def agenda_delete_event(event_id):
     user_id = session['user_id']
     conn    = get_db_connection()
     if conn:
-        conn.execute("UPDATE agenda_events SET status='cancelled' WHERE id=? AND user_id=?", (event_id, user_id))
+        cursor = conn.cursor()
+        cursor.execute("UPDATE agenda_events SET status='cancelled' WHERE id=%s AND user_id=%s", (event_id, user_id))
         conn.commit(); conn.close()
     return jsonify({'success': True})
 
@@ -4392,7 +4340,7 @@ def agenda_today():
         cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM agenda_events
-            WHERE user_id=? AND status='active' AND DATE(start_datetime)=?
+            WHERE user_id=%s AND status='active' AND DATE(start_datetime)=%s
             ORDER BY start_datetime ASC
         ''', (user_id, today))
         events = [dict(r) for r in cursor.fetchall()]
@@ -4434,546 +4382,35 @@ def agenda_test_email():
 
 
 # ══════════════════════════════════════════════════════════════
-# EMAIL AUTOMATIQUE À L'INSCRIPTION — Paiement cliquable
+# DÉMARRAGE AUTO — Compatible Gunicorn ET python app.py
 # ══════════════════════════════════════════════════════════════
-
-def _send_inscription_payment_email(lead: dict) -> bool:
-    """
-    Envoyé automatiquement dès qu'un prospect soumet le formulaire.
-    Contient des boutons cliquables pour chaque moyen de paiement.
-    """
-    cfg    = GMAIL_CONFIG
-    name   = lead.get('full_name', 'Cher(e) futur(e) trader')
-    email  = lead.get('email', '')
-    level  = lead.get('level_selected', 'Formation')
-    wa_raw = lead.get('whatsapp', '').replace(' ', '').replace('+', '')
-    prices = FORMATION_PRICES.get(level, {'xaf': 50000, 'eur': 76})
-    xaf    = prices['xaf']
-    eur    = prices['eur']
-
-    # ── URLs de paiement cliquables ─────────────────────────────────────────
-    wa_msg   = f"Bonjour,%20je%20viens%20de%20m%27inscrire%20à%20la%20formation%20{level.replace(' ','%20')}%20et%20je%20souhaite%20régler%20par%20"
-    url_om   = f"https://wa.me/237695072759?text={wa_msg}Orange%20Money%20(695%20072%20759).%20Mon%20nom%20:%20{name.replace(' ','%20')}"
-    url_mtn  = f"https://wa.me/237695072759?text={wa_msg}MTN%20MoMo%20(670%20695%20946).%20Mon%20nom%20:%20{name.replace(' ','%20')}"
-    url_pp   = "https://www.paypal.com/paypalme/fabricekengni"
-    url_wa   = f"https://wa.me/237695072759?text=Bonjour,%20j%27ai%20effectué%20mon%20paiement%20pour%20la%20formation%20{level.replace(' ','%20')}.%20Mon%20nom%20:%20{name.replace(' ','%20')}"
-
-    html = f"""<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Kengni Trading Academy — Paiement</title>
-</head>
-<body style="margin:0;padding:0;background:#060d17;font-family:'Segoe UI',Arial,sans-serif;">
-<div style="max-width:600px;margin:0 auto;padding:20px;">
-
-  <!-- HEADER -->
-  <div style="background:linear-gradient(135deg,#0a1628 0%,#0f2a1e 100%);border-radius:20px 20px 0 0;padding:40px 32px 32px;text-align:center;border-bottom:3px solid #00d4aa;">
-    <div style="font-size:3.5rem;margin-bottom:12px;">🎓</div>
-    <h1 style="color:#fff;margin:0 0 6px;font-size:24px;font-weight:900;letter-spacing:.3px;">Kengni Trading Academy</h1>
-    <p style="color:#00d4aa;margin:0;font-size:15px;font-weight:700;">Votre inscription est confirmée ✅</p>
-  </div>
-
-  <!-- BODY -->
-  <div style="background:#0d1421;padding:32px;border:1px solid #1a2a3a;border-top:none;border-radius:0 0 20px 20px;">
-
-    <!-- Salutation -->
-    <p style="color:#e0e0e0;font-size:15px;line-height:1.75;margin:0 0 24px;">
-      Bonjour <strong style="color:#00d4aa;">{name}</strong> 👋<br><br>
-      Merci pour votre inscription à la formation
-      <strong style="color:#fff;background:rgba(0,212,170,.1);padding:2px 8px;border-radius:6px;">{level}</strong> !
-      <br><br>
-      Votre place est <strong style="color:#ffd700;">réservée pendant 48h</strong>.
-      Pour la confirmer définitivement, veuillez procéder au paiement via l'un des boutons ci-dessous.
-    </p>
-
-    <!-- PRIX -->
-    <div style="background:linear-gradient(135deg,rgba(0,212,170,.18),rgba(0,212,170,.06));border:1.5px solid rgba(0,212,170,.35);border-radius:16px;padding:24px;text-align:center;margin-bottom:28px;">
-      <div style="font-size:.8rem;color:#888;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">Montant de la formation — {level}</div>
-      <div style="font-size:2.6rem;font-weight:900;color:#00d4aa;line-height:1;">{xaf:,} <span style="font-size:1.2rem;">FCFA</span></div>
-      <div style="font-size:1rem;color:#666;margin-top:6px;">≈ {eur} EUR</div>
-    </div>
-
-    <!-- TITRE BOUTONS -->
-    <h2 style="color:#fff;font-size:16px;font-weight:800;margin:0 0 16px;text-align:center;">
-      👇 Choisissez votre moyen de paiement
-    </h2>
-
-    <!-- BOUTON ORANGE MONEY -->
-    <a href="{url_om}" target="_blank"
-       style="display:block;text-decoration:none;margin-bottom:12px;">
-      <div style="background:linear-gradient(135deg,#c44b00,#ff6b00);border-radius:14px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;transition:all .2s;box-shadow:0 4px 18px rgba(255,107,0,.3);">
-        <div style="display:flex;align-items:center;gap:14px;">
-          <div style="font-size:2rem;">🟠</div>
-          <div>
-            <div style="color:#fff;font-weight:800;font-size:15px;">Orange Money</div>
-            <div style="color:rgba(255,255,255,.75);font-size:13px;margin-top:2px;">Numéro : <strong>695 072 759</strong> — Fabrice Kengni</div>
-          </div>
-        </div>
-        <div style="color:#fff;font-size:1.4rem;">→</div>
-      </div>
-    </a>
-
-    <!-- BOUTON MTN -->
-    <a href="{url_mtn}" target="_blank"
-       style="display:block;text-decoration:none;margin-bottom:12px;">
-      <div style="background:linear-gradient(135deg,#b8860b,#ffd700);border-radius:14px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 4px 18px rgba(255,215,0,.25);">
-        <div style="display:flex;align-items:center;gap:14px;">
-          <div style="font-size:2rem;">🟡</div>
-          <div>
-            <div style="color:#000;font-weight:800;font-size:15px;">MTN Mobile Money</div>
-            <div style="color:rgba(0,0,0,.65);font-size:13px;margin-top:2px;">Numéro : <strong>670 695 946</strong> — Fabrice Kengni</div>
-          </div>
-        </div>
-        <div style="color:#000;font-size:1.4rem;">→</div>
-      </div>
-    </a>
-
-    <!-- BOUTON PAYPAL -->
-    <a href="{url_pp}" target="_blank"
-       style="display:block;text-decoration:none;margin-bottom:12px;">
-      <div style="background:linear-gradient(135deg,#003087,#009cde);border-radius:14px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 4px 18px rgba(0,156,222,.3);">
-        <div style="display:flex;align-items:center;gap:14px;">
-          <div style="font-size:2rem;">🔵</div>
-          <div>
-            <div style="color:#fff;font-weight:800;font-size:15px;">PayPal</div>
-            <div style="color:rgba(255,255,255,.75);font-size:13px;margin-top:2px;">fabrice.kengni@icloud.com — <em>Amis &amp; Famille</em></div>
-          </div>
-        </div>
-        <div style="color:#fff;font-size:1.4rem;">→</div>
-      </div>
-    </a>
-
-    <!-- BOUTON CRYPTO -->
-    <a href="mailto:fabrice.kengni12@gmail.com?subject=Paiement%20Crypto%20—%20{level.replace(' ','%20')}&body=Bonjour,%20je%20souhaite%20payer%20en%20crypto%20pour%20la%20formation%20{level.replace(' ','%20')}.%20Mon%20nom%20:%20{name.replace(' ','%20')}"
-       style="display:block;text-decoration:none;margin-bottom:24px;">
-      <div style="background:linear-gradient(135deg,#7a4500,#f7931a);border-radius:14px;padding:18px 22px;display:flex;align-items:center;justify-content:space-between;box-shadow:0 4px 18px rgba(247,147,26,.3);">
-        <div style="display:flex;align-items:center;gap:14px;">
-          <div style="font-size:2rem;">₿</div>
-          <div>
-            <div style="color:#fff;font-weight:800;font-size:15px;">Crypto (BTC / USDT / ETH)</div>
-            <div style="color:rgba(255,255,255,.75);font-size:13px;margin-top:2px;">Cliquez pour demander l'adresse de wallet par email</div>
-          </div>
-        </div>
-        <div style="color:#fff;font-size:1.4rem;">→</div>
-      </div>
-    </a>
-
-    <!-- SÉPARATEUR -->
-    <div style="border-top:1px solid #1a2a3a;margin:4px 0 24px;"></div>
-
-    <!-- INSTRUCTIONS -->
-    <div style="background:rgba(255,215,0,.07);border:1px solid rgba(255,215,0,.2);border-radius:14px;padding:18px 20px;margin-bottom:24px;">
-      <p style="color:#ffd700;font-weight:800;font-size:14px;margin:0 0 10px;">📋 Après votre paiement — 3 étapes</p>
-      <div style="display:flex;flex-direction:column;gap:10px;">
-        <div style="display:flex;align-items:flex-start;gap:12px;">
-          <div style="background:#ffd700;color:#000;border-radius:50%;width:22px;height:22px;min-width:22px;font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;">1</div>
-          <div style="color:#ccc;font-size:13px;line-height:1.5;">Prenez une <strong style="color:#fff;">capture d'écran</strong> de votre reçu de paiement</div>
-        </div>
-        <div style="display:flex;align-items:flex-start;gap:12px;">
-          <div style="background:#ffd700;color:#000;border-radius:50%;width:22px;height:22px;min-width:22px;font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;">2</div>
-          <div style="color:#ccc;font-size:13px;line-height:1.5;">Envoyez-la sur <strong style="color:#25d366;">WhatsApp au +237 695 072 659</strong></div>
-        </div>
-        <div style="display:flex;align-items:flex-start;gap:12px;">
-          <div style="background:#ffd700;color:#000;border-radius:50%;width:22px;height:22px;min-width:22px;font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;">3</div>
-          <div style="color:#ccc;font-size:13px;line-height:1.5;">Votre accès à la formation est <strong style="color:#00d4aa;">activé sous 24h</strong></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- CTA WHATSAPP -->
-    <div style="text-align:center;margin-bottom:8px;">
-      <a href="{url_wa}" target="_blank"
-         style="display:inline-block;background:linear-gradient(135deg,#128c7e,#25d366);color:#fff;font-weight:800;font-size:15px;padding:16px 36px;border-radius:12px;text-decoration:none;box-shadow:0 6px 20px rgba(37,211,102,.4);letter-spacing:.3px;">
-        💬 Contacter sur WhatsApp
-      </a>
-    </div>
-
-    <!-- FOOTER -->
-    <div style="border-top:1px solid #1a2a3a;padding-top:18px;text-align:center;margin-top:24px;">
-      <p style="color:#333;font-size:11px;margin:0 0 4px;">Kengni Trading Academy · fabrice.kengni12@gmail.com</p>
-      <p style="color:#222;font-size:10px;margin:0;">Cet email vous a été envoyé automatiquement suite à votre inscription.</p>
-    </div>
-  </div>
-</div>
-</body>
-</html>"""
-
-    text = (
-        f"Bonjour {name},\n\n"
-        f"Merci pour votre inscription à la formation {level} !\n\n"
-        f"MONTANT : {xaf:,} FCFA (≈ {eur} EUR)\n\n"
-        f"MOYENS DE PAIEMENT :\n"
-        f"• Orange Money   : 695 072 759 (Fabrice Kengni)\n"
-        f"• MTN MoMo       : 670 695 946 (Fabrice Kengni)\n"
-        f"• PayPal         : fabrice.kengni@icloud.com\n"
-        f"• Crypto         : Écrivez à fabrice.kengni12@gmail.com\n\n"
-        f"Après paiement, envoyez la capture sur WhatsApp : +237 695 072 759\n\n"
-        f"— Kengni Trading Academy"
-    )
-
-    if not email:
-        print("[Inscription] ⚠️  Pas d'email — envoi annulé")
-        return False
-
+def _startup():
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject']  = f"🎓 {name}, finalisez votre inscription — {level} | Kengni Trading Academy"
-        msg['From']     = f"Kengni Trading Academy <{cfg['sender_email']}>"
-        msg['To']       = email
-        msg['Reply-To'] = cfg['sender_email']
-        msg.attach(MIMEText(text, 'plain', 'utf-8'))
-        msg.attach(MIMEText(html, 'html',  'utf-8'))
-
-        # Copie admin
-        admin_msg = MIMEMultipart('alternative')
-        admin_msg['Subject'] = f"📥 Nouvelle inscription — {name} ({level})"
-        admin_msg['From']    = f"Kengni Finance <{cfg['sender_email']}>"
-        admin_msg['To']      = cfg['receiver_email']
-        admin_body = (
-            f"Nouveau prospect inscrit !\n\n"
-            f"Nom      : {name}\n"
-            f"Email    : {email}\n"
-            f"WhatsApp : {lead.get('whatsapp','')}\n"
-            f"Formation: {level}\n"
-            f"Capital  : {lead.get('capital','—')}\n"
-            f"Objectif : {lead.get('objective','—')}\n"
-            f"Date     : {datetime.now().strftime('%d/%m/%Y à %H:%M')}\n"
-        )
-        admin_msg.attach(MIMEText(admin_body, 'plain', 'utf-8'))
-
-        with smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port']) as s:
-            s.ehlo(); s.starttls()
-            s.login(cfg['sender_email'], cfg['smtp_password'])
-            s.sendmail(cfg['sender_email'], email, msg.as_string())
-            s.sendmail(cfg['sender_email'], cfg['receiver_email'], admin_msg.as_string())
-
-        print(f"[Inscription] ✅ Email paiement → {email} | Notif admin → {cfg['receiver_email']}")
-        return True
+        init_db()
+        print("[Init] ✅ Base de données PostgreSQL initialisée")
     except Exception as e:
-        print(f"[Inscription] ❌ Erreur envoi : {e}")
-        return False
-
-
-# ══════════════════════════════════════════════════════════════
-# RAPPORT AUTOMATIQUE — Matin 7h / Midi 12h / Soir 20h
-# ══════════════════════════════════════════════════════════════
-
-def _build_report_html(data: dict, period: str) -> str:
-    """Construit le HTML du rapport journalier."""
-    now_str  = datetime.now().strftime('%d/%m/%Y à %H:%M')
-    emojis   = {'Matin': '🌅', 'Midi': '☀️', 'Soir': '🌙'}
-    em       = emojis.get(period, '📊')
-
-    leads    = data.get('leads', {})
-    fin      = data.get('finances', {})
-    agenda   = data.get('agenda', [])
-    notifs   = data.get('notifications', 0)
-    trades   = data.get('trades', {})
-
-    agenda_rows = ''
-    for ev in agenda[:8]:
-        color = {'trading':'#00d4aa','finance':'#4a9eff','formation':'#a29bfe',
-                 'reunion':'#ffd700','revue':'#ff7675','personnel':'#fd79a8'}.get(ev.get('event_type',''), '#888')
-        agenda_rows += f"""
-        <tr>
-          <td style="padding:8px 12px;color:#e0e0e0;font-size:13px;border-bottom:1px solid #1a2a3a;">{ev.get('title','')}</td>
-          <td style="padding:8px 12px;font-size:12px;border-bottom:1px solid #1a2a3a;">
-            <span style="color:{color};font-weight:600;">{ev.get('event_type','').title()}</span>
-          </td>
-          <td style="padding:8px 12px;color:#888;font-size:12px;border-bottom:1px solid #1a2a3a;">
-            {(ev.get('start_datetime') or '')[:16].replace('T',' ')}
-          </td>
-        </tr>"""
-
-    if not agenda_rows:
-        agenda_rows = '<tr><td colspan="3" style="padding:12px;color:#444;text-align:center;font-size:13px;">Aucun événement à venir</td></tr>'
-
-    return f"""<!DOCTYPE html>
-<html lang="fr">
-<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-<body style="margin:0;padding:0;background:#060d17;font-family:'Segoe UI',Arial,sans-serif;">
-<div style="max-width:640px;margin:0 auto;padding:20px;">
-
-  <!-- HEADER -->
-  <div style="background:linear-gradient(135deg,#0a1628,#0d2a1a);border-radius:20px 20px 0 0;padding:36px 32px;text-align:center;border-bottom:3px solid #00d4aa;">
-    <div style="font-size:3rem;margin-bottom:10px;">{em}</div>
-    <h1 style="color:#fff;margin:0 0 6px;font-size:22px;font-weight:900;">Rapport {period}</h1>
-    <p style="color:#00d4aa;margin:0;font-size:14px;font-weight:600;">Kengni Finance · {now_str}</p>
-  </div>
-
-  <div style="background:#0d1421;padding:28px 32px;border:1px solid #1a2a3a;border-top:none;border-radius:0 0 20px 20px;">
-
-    <!-- ── LEADS ── -->
-    <h2 style="color:#fff;font-size:15px;font-weight:800;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid #1a2a3a;">
-      🎓 Prospects — Kengni Trading Academy
-    </h2>
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:22px;">
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #4a9eff;">
-        <div style="font-size:1.8rem;font-weight:900;color:#4a9eff;">{leads.get('total',0)}</div>
-        <div style="font-size:.7rem;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:3px;">Total</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #ffd700;">
-        <div style="font-size:1.8rem;font-weight:900;color:#ffd700;">{leads.get('nouveau',0)}</div>
-        <div style="font-size:.7rem;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:3px;">Nouveaux</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #00d4aa;">
-        <div style="font-size:1.8rem;font-weight:900;color:#00d4aa;">{leads.get('paye',0)}</div>
-        <div style="font-size:.7rem;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-top:3px;">Payés ✅</div>
-      </div>
-    </div>
-    <div style="background:#0a1628;border-radius:10px;padding:12px 16px;margin-bottom:22px;display:flex;justify-content:space-between;align-items:center;">
-      <span style="color:#888;font-size:13px;">Taux de conversion</span>
-      <span style="color:#00d4aa;font-weight:800;font-size:16px;">{leads.get('conversion','0%')}</span>
-    </div>
-
-    <!-- ── FINANCES ── -->
-    <h2 style="color:#fff;font-size:15px;font-weight:800;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid #1a2a3a;">
-      💰 Finances (30 derniers jours)
-    </h2>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:22px;">
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #00ff88;">
-        <div style="font-size:1.1rem;font-weight:800;color:#00ff88;">{fin.get('revenus','0')} €</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Revenus</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #ff4757;">
-        <div style="font-size:1.1rem;font-weight:800;color:#ff4757;">{fin.get('depenses','0')} €</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Dépenses</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #ffd700;">
-        <div style="font-size:1.1rem;font-weight:800;color:#ffd700;">{fin.get('solde','0')} €</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Solde net</div>
-      </div>
-    </div>
-
-    <!-- ── TRADING ── -->
-    <h2 style="color:#fff;font-size:15px;font-weight:800;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid #1a2a3a;">
-      📈 Trading (30 derniers jours)
-    </h2>
-    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:22px;">
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #00d4aa;">
-        <div style="font-size:1.6rem;font-weight:900;color:#00d4aa;">{trades.get('total',0)}</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Trades</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #00ff88;">
-        <div style="font-size:1.6rem;font-weight:900;color:#00ff88;">{trades.get('gagnants',0)}</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Gagnants</div>
-      </div>
-      <div style="background:#0a1628;border-radius:12px;padding:14px;text-align:center;border-top:2px solid #a29bfe;">
-        <div style="font-size:1.6rem;font-weight:900;color:#a29bfe;">{trades.get('winrate','0%')}</div>
-        <div style="font-size:.68rem;color:#666;text-transform:uppercase;margin-top:3px;">Win Rate</div>
-      </div>
-    </div>
-
-    <!-- ── AGENDA ── -->
-    <h2 style="color:#fff;font-size:15px;font-weight:800;margin:0 0 14px;padding-bottom:8px;border-bottom:1px solid #1a2a3a;">
-      📅 Prochains événements agenda
-    </h2>
-    <div style="background:#0a1628;border-radius:12px;overflow:hidden;margin-bottom:22px;">
-      <table style="width:100%;border-collapse:collapse;">
-        <thead>
-          <tr style="background:#060d17;">
-            <th style="padding:10px 12px;color:#555;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;text-align:left;">Événement</th>
-            <th style="padding:10px 12px;color:#555;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;text-align:left;">Type</th>
-            <th style="padding:10px 12px;color:#555;font-size:.7rem;text-transform:uppercase;letter-spacing:.5px;text-align:left;">Date</th>
-          </tr>
-        </thead>
-        <tbody>{agenda_rows}</tbody>
-      </table>
-    </div>
-
-    <!-- ── NOTIFICATIONS ── -->
-    <div style="background:rgba(74,158,255,.08);border:1px solid rgba(74,158,255,.2);border-radius:12px;padding:14px 18px;margin-bottom:24px;display:flex;align-items:center;justify-content:space-between;">
-      <span style="color:#ccc;font-size:13px;">🔔 Notifications non lues</span>
-      <span style="color:#4a9eff;font-weight:800;font-size:18px;">{notifs}</span>
-    </div>
-
-    <!-- FOOTER -->
-    <div style="border-top:1px solid #1a2a3a;padding-top:16px;text-align:center;">
-      <a href="http://localhost:5001/dashboard"
-         style="display:inline-block;background:linear-gradient(135deg,#00d4aa,#00ff88);color:#000;font-weight:800;font-size:13px;padding:12px 28px;border-radius:10px;text-decoration:none;margin-bottom:12px;">
-        📊 Ouvrir le Dashboard
-      </a>
-      <p style="color:#222;font-size:10px;margin:10px 0 0;">Kengni Finance v2.0 · Rapport automatique {period}</p>
-    </div>
-  </div>
-</div>
-</body>
-</html>"""
-
-
-def _collect_report_data() -> dict:
-    """Collecte toutes les données pour le rapport."""
+        print(f"[Init] ❌ Erreur DB : {e}")
     try:
-        conn = get_db_connection()
-        if not conn:
-            return {'leads': {}, 'finances': {}, 'trades': {}, 'agenda': [], 'notifications': 0}
-        PG = DATABASE_URL is not None
-        PH = '%s' if PG else '?'
-        cur  = conn.cursor()
-        now  = datetime.now()
-        d30  = (now - timedelta(days=30)).isoformat()
-
-        # Leads
-        cur.execute("SELECT status FROM training_leads")
-        rows = cur.fetchall()
-        all_leads = [r[0] if PG else r['status'] for r in rows]
-        total_l   = len(all_leads)
-        paye_l    = all_leads.count('Payé')
-        conv      = f"{round(paye_l/total_l*100,1)}%" if total_l else "0%"
-
-        leads = {
-            'total':      total_l,
-            'nouveau':    all_leads.count('Nouveau'),
-            'contacte':   all_leads.count('Contacté'),
-            'inscrit':    all_leads.count('Inscrit'),
-            'paye':       paye_l,
-            'conversion': conv,
-        }
-
-        # Finances
-        cur.execute(f"SELECT type, amount FROM transactions WHERE user_id=1 AND created_at>={PH}", (d30,))
-        txns = [dict(r) for r in cur.fetchall()]
-        rev  = sum(t['amount'] for t in txns if t['amount'] > 0)
-        dep  = abs(sum(t['amount'] for t in txns if t['amount'] < 0))
-        fin  = {
-            'revenus':  f"{rev:,.2f}",
-            'depenses': f"{dep:,.2f}",
-            'solde':    f"{rev-dep:,.2f}",
-        }
-
-        # Trading
-        try:
-            cur.execute(f"SELECT COUNT(*) as c FROM transactions WHERE user_id=1 AND type IN ('buy','sell') AND created_at>={PH}", (d30,))
-            row = cur.fetchone()
-            total_tr = row[0] if PG else row['c']
-            cur.execute(f"SELECT COUNT(*) as c FROM transactions WHERE user_id=1 AND type='sell' AND amount>0 AND created_at>={PH}", (d30,))
-            row = cur.fetchone()
-            win_tr = row[0] if PG else row['c']
-            wr       = f"{round(win_tr/total_tr*100)}%" if total_tr else "0%"
-        except Exception:
-            total_tr, win_tr, wr = 0, 0, "0%"
-
-        trades = {'total': total_tr, 'gagnants': win_tr, 'winrate': wr}
-
-        # Agenda — 8 prochains événements
-        cur.execute(f"""
-            SELECT title, event_type, start_datetime FROM agenda_events
-            WHERE status='active' AND start_datetime >= {PH}
-            ORDER BY start_datetime ASC LIMIT 8
-        """, (now.isoformat(),))
-        agenda = [dict(zip(['title','event_type','start_datetime'], r)) if PG else dict(r) for r in cur.fetchall()]
-
-        # Notifications non lues
-        cur.execute(f"SELECT COUNT(*) as c FROM notifications WHERE is_read=0 AND user_id=1")
-        row = cur.fetchone()
-        notifs = row[0] if PG else row['c']
-
-        conn.close()
-        return {'leads': leads, 'finances': fin, 'trades': trades, 'agenda': agenda, 'notifications': notifs}
+        start_agenda_scheduler()
+        print("[Init] ✅ Agenda scheduler démarré")
     except Exception as e:
-        print(f"[Rapport] Erreur collecte données : {e}")
-        return {'leads': {}, 'finances': {}, 'trades': {}, 'agenda': [], 'notifications': 0}
+        print(f"[Init] ❌ Erreur scheduler : {e}")
 
-
-def _send_daily_report(period: str):
-    """Envoie le rapport par email."""
-    cfg  = GMAIL_CONFIG
-    data = _collect_report_data()
-    html = _build_report_html(data, period)
-    now_str = datetime.now().strftime('%d/%m/%Y')
-
-    emojis = {'Matin': '🌅', 'Midi': '☀️', 'Soir': '🌙'}
-    em = emojis.get(period, '📊')
-
-    leads = data.get('leads', {})
-    text  = (
-        f"RAPPORT {period.upper()} — Kengni Finance\n"
-        f"Date : {now_str}\n\n"
-        f"LEADS : {leads.get('total',0)} total · {leads.get('nouveau',0)} nouveaux · {leads.get('paye',0)} payés ({leads.get('conversion','0%')})\n"
-        f"FINANCES : Revenus {data['finances'].get('revenus','0')}€ · Dépenses {data['finances'].get('depenses','0')}€ · Solde {data['finances'].get('solde','0')}€\n"
-        f"TRADING : {data['trades'].get('total',0)} trades · {data['trades'].get('winrate','0%')} win rate\n"
-        f"AGENDA : {len(data['agenda'])} événements à venir\n"
-        f"NOTIFICATIONS : {data.get('notifications',0)} non lues\n"
-    )
-
-    try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"{em} Rapport {period} — Kengni Finance · {now_str}"
-        msg['From']    = f"Kengni Finance <{cfg['sender_email']}>"
-        msg['To']      = cfg['receiver_email']
-        msg.attach(MIMEText(text, 'plain', 'utf-8'))
-        msg.attach(MIMEText(html, 'html', 'utf-8'))
-
-        with smtplib.SMTP(cfg['smtp_host'], cfg['smtp_port']) as s:
-            s.ehlo(); s.starttls()
-            s.login(cfg['sender_email'], cfg['smtp_password'])
-            s.sendmail(cfg['sender_email'], cfg['receiver_email'], msg.as_string())
-
-        print(f"[Rapport {period}] ✅ Envoyé à {cfg['receiver_email']}")
-    except Exception as e:
-        print(f"[Rapport {period}] ❌ Erreur : {e}")
-
-
-def _report_scheduler_loop():
-    """Vérifie toutes les minutes si un rapport doit être envoyé (7h / 12h / 20h)."""
-    sent_today = set()   # 'Matin·2025-01-15', 'Midi·...', 'Soir·...'
-
-    SCHEDULE = {
-        'Matin': (7,  0),
-        'Midi':  (12, 0),
-        'Soir':  (20, 0),
-    }
-
-    while True:
-        now   = datetime.now()
-        today = now.strftime('%Y-%m-%d')
-
-        for period, (h, m) in SCHEDULE.items():
-            key = f"{period}·{today}"
-            if key in sent_today:
-                continue
-            # Déclenche si on est dans la bonne fenêtre (heure pile ±90s)
-            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            diff   = abs((now - target).total_seconds())
-            if diff <= 90:
-                _send_daily_report(period)
-                sent_today.add(key)
-
-        # Nettoyage quotidien du set
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        sent_today = {k for k in sent_today if yesterday not in k}
-
-        time.sleep(60)
-
-
-def start_report_scheduler():
-    """Lance le scheduler de rapports en thread daemon."""
-    t = threading.Thread(target=_report_scheduler_loop, daemon=True, name='ReportScheduler')
-    t.start()
-    print("✅ Report Scheduler démarré (rapports à 7h, 12h, 20h → iCloud)")
-
+_startup()
 
 if __name__ == '__main__':
-
-    # Initialize database on startup
-    init_db()
-
-    # Démarrer le scheduler d'agenda (rappels email Gmail)
-    start_agenda_scheduler()
-    start_report_scheduler()
+    pass
     
     # Run the application
     print("=" * 60)
     print("🚀 Kengni Finance v2.0 - Démarrage")
     print("=" * 60)
     print("📊 Application de gestion financière et trading avec IA")
-    print("🌐 Mode:", "PostgreSQL (Railway)" if DATABASE_URL else "SQLite (Local)")
+    print("🌐 URL: http://localhost:5001")
     print("👤 Email: fabrice.kengni@icloud.com")
-    print("📅 Agenda: /agenda")
+    print("🔐 Password: Kengni@fablo12")
+    print("📅 Agenda: http://localhost:5001/agenda")
+    print("📧 Rappels Gmail: fabricekengni90@gmail.com → fabrice.kengni@icloud.com")
     print("=" * 60)
     
-    port = int(os.environ.get('PORT', 5001))
-    debug = not DATABASE_URL  # debug=False en production Railway
-    app.run(debug=debug, host='0.0.0.0', port=port)
+    app.run(debug=True, host='0.0.0.0', port=5001)
