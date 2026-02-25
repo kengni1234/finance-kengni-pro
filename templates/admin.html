@@ -208,4 +208,10 @@ async function deleteUser(){const id=document.getElementById('deleteUserId').val
 function filterTable(){const q=document.getElementById('searchInput').value.toLowerCase(),r=document.getElementById('filterRole').value,s=document.getElementById('filterStatus').value;document.querySelectorAll('#usersTable tbody tr').forEach(row=>{const m=(!q||row.textContent.toLowerCase().includes(q))&&(!r||row.dataset.role===r)&&(!s||row.dataset.status===s);row.style.display=m?'':'none'})}
 function copyToken(){navigator.clipboard.writeText('http://localhost:5001/{{ token }}');toast('URL secrète copiée !')}
 </script>
+
+<!-- Vercel Web Analytics -->
+<script>
+    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+</script>
+<script defer src="/_vercel/insights/script.js"></script>
 </body></html>
